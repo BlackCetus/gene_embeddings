@@ -228,6 +228,7 @@ def generate_orthrus_embeddings(gene2rna, track_type: str = "4", out_dir: str = 
 
     os.makedirs(out_dir, exist_ok=True)
     gene2emb = {}
+    status_counts = {"ok": 0, "no_six_track": 0, "embed_failed": 0}
 
     genome = None
     if track_type == "6":
@@ -253,7 +254,9 @@ def generate_orthrus_embeddings(gene2rna, track_type: str = "4", out_dir: str = 
             else:
                 six = six_track_encoding_for_gene(genome, gene)
                 if six is None:
-                    raise RuntimeError(f"No six-track encoding for {gene}")
+                    status_counts["no_six_track"] += 1
+                    print(f"Skipping {gene}: no six-track encoding available")
+                    continue
                 six_tt = torch.tensor(six, dtype=torch.float32, device=device)  # (L,6)
                 model_input_tt = six_tt.unsqueeze(0)  # (1,L,6)
                 lengths = torch.tensor([model_input_tt.shape[1]], device=device)
@@ -266,11 +269,22 @@ def generate_orthrus_embeddings(gene2rna, track_type: str = "4", out_dir: str = 
                 )
             
             gene2emb[gene] = embedding.squeeze(0).cpu().numpy()
+            status_counts["ok"] += 1
 
         except Exception as e:
+            status_counts["embed_failed"] += 1
             print(f"Error generating embedding for gene {gene}: {e}")
 
-    print("Embedding generation complete.")
+    total_genes = len(gene2rna)
+    print(
+        "Embedding generation complete. Summary -> total: {total}, ok: {ok}, "
+        "no_six_track: {no_six}, embed_failed: {failed}".format(
+            total=total_genes,
+            ok=status_counts["ok"],
+            no_six=status_counts["no_six_track"],
+            failed=status_counts["embed_failed"],
+        )
+    )
 
     # Persist embeddings
     os.makedirs(out_dir, exist_ok=True)
@@ -338,6 +352,16 @@ if __name__ == "__main__":
         print("Genes to embed (omics ∩ HPO filtered):", len(genes_to_embed))
 
     gene2rna = gene_symbol_to_cdna_fasta(cdna_fasta, genes_to_embed)
+
+    if genes_to_embed is not None:
+        requested = len(genes_to_embed)
+        with_sequence = len(gene2rna)
+        missing = requested - with_sequence
+        print(
+            "cDNA coverage -> requested genes: {req}, with_sequence: {with_seq}, "
+            "missing: {missing}".format(req=requested, with_seq=with_sequence, missing=missing)
+        )
+
     print("Genes with cDNA sequence:", len(gene2rna))
     if gene2rna:
         first_gene = next(iter(gene2rna))
