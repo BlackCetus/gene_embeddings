@@ -23,7 +23,7 @@ OUT_DIR = os.path.join(DEFAULT_DATASET_DIR, "orthrus_embeddings")
 CDNA_FASTA = os.path.join(DEFAULT_DATASET_DIR, "ensembl_human_cds.fasta")  # Download from Ensembl
 TRACK_TYPE = "6"  # choose "4" or "6"; six-track requires GenomeKit assets
 MIN_GENES_PER_HPO = 20
-GENOME_NAME = "gencode.v49"  # required for six-track via GenomeKit
+GENOME_NAME = "gencode.v41"  # required for six-track via GenomeKit
 
 
 def _seq_to_oh_dna(seq: str) -> np.ndarray:
