@@ -106,33 +106,54 @@ def _create_six_track_encoding(tx, genome, channels_last: bool = True) -> np.nda
     oh_t = oh.T
     return np.concatenate([oh_t, cds_track[None, :], splice_track[None, :]], axis=0)
 
-def gene_symbol_to_cdna_fasta(fasta_path: str, gene_symbols: set[str]) -> dict[str, str]:
+
+def gene_symbol_to_cdna_fasta(
+    fasta_path: str,
+    gene_symbols: set[str] | None = None,
+) -> dict[str, str]:
     """Load cDNA sequences from Ensembl FASTA, keyed by gene symbol.
-    Ensembl FASTA headers typically contain gene info; extract symbol from description.
-    Returns the longest sequence if multiple entries exist for the same gene."""
-    gene2seq = {}
-    
-    # Build a lookup for faster matching
-    symbols_lower = {s.lower(): s for s in gene_symbols}
+
+    If ``gene_symbols`` is given, only those symbols are kept (case-insensitive).
+    If ``gene_symbols`` is ``None``, all genes present in the FASTA are used.
+    Returns the longest sequence if multiple entries exist for the same gene.
+    """
+    gene2seq: dict[str, str] = {}
+
+    # Optional lookup when we only want a subset of symbols
+    symbols_lower = None
+    if gene_symbols is not None:
+        symbols_lower = {s.lower(): s for s in gene_symbols}
 
     for record in SeqIO.parse(fasta_path, "fasta"):
         desc = record.description
-        # Ensembl cDNA headers: "ENST... chromosome:...:... gene:ENSG...:SYMBOL:..."
-        # Look for gene symbol in description
-        gene = None
-        
-        # Try to parse header to find symbol
-        parts = desc.split()
-        for part in parts:
-            if ":" in part:
-                subparts = part.split(":")
-                for sp in subparts:
-                    sp_lower = sp.lower()
-                    if sp_lower in symbols_lower:
-                        gene = symbols_lower[sp_lower]
-                        break
-            if gene:
-                break
+        gene: str | None = None
+
+        if symbols_lower is not None:
+            # Ensembl cDNA headers: "ENST... chromosome:...:... gene:ENSG...:SYMBOL:..."
+            # Look for any token that matches one of our requested symbols.
+            parts = desc.split()
+            for part in parts:
+                if ":" in part:
+                    subparts = part.split(":")
+                    for sp in subparts:
+                        sp_lower = sp.lower()
+                        if sp_lower in symbols_lower:
+                            gene = symbols_lower[sp_lower]
+                            break
+                if gene:
+                    break
+        else:
+            # No filter provided: parse the Ensembl-style header to recover the
+            # gene symbol directly from structured fields when possible.
+            # Prefer explicit "gene_symbol:" if present.
+            m = re.search(r"gene_symbol:([^\s]+)", desc)
+            if m:
+                gene = m.group(1)
+            else:
+                # Fallback: for headers like "gene:ENSG...:SYMBOL:..." take SYMBOL.
+                m2 = re.search(r"gene:([^\s:]+):([^\s:]+)", desc)
+                if m2:
+                    gene = m2.group(2)
 
         if not gene:
             continue
@@ -275,6 +296,14 @@ if __name__ == "__main__":
         choices=["4", "6"],
         help="Orthrus track type to use: '4' (RNA one-hot) or '6' (GenomeKit six-track)",
     )
+    parser.add_argument(
+        "--all-fasta-genes",
+        action="store_true",
+        help=(
+            "If set, generate embeddings for all genes present in the cDNA FASTA "
+            "(ignores HPO/omics filtering)."
+        ),
+    )
     args = parser.parse_args()
 
     dataset_dir = os.path.abspath(args.dataset_dir)
@@ -282,27 +311,32 @@ if __name__ == "__main__":
     cdna_fasta = os.path.join(dataset_dir, "ensembl_human_cds.fasta")
     gene2rna_path = os.path.join(dataset_dir, "gene2rna.pkl")
     track_type = args.track_type
-
-    # ---------------- Load omics genes and map to symbols ----------------
-    df_emb = load_omics_embedding(dataset_dir)  # index: gene_id
-    df_emb = map_ensembl_to_symbol(df_emb)  # reindexed to gene_symbol
-    omics_syms = set(df_emb.index.tolist())
-    print("Omics genes (symbols):", len(omics_syms))
-
-    # ---------------- Filter HPO genes (>=20 per term) ----------------
-    hpo_syms = filter_hpo_genes(min_genes_per_term=MIN_GENES_PER_HPO, dataset_dir=dataset_dir)
-    print("HPO genes (filtered):", len(hpo_syms))
-
-    # ---------------- Intersect ----------------
-    genes_to_embed = omics_syms & hpo_syms
-    print("Genes to embed (omics ∩ HPO filtered):", len(genes_to_embed))
+    use_all_fasta_genes = args.all_fasta_genes
 
     # ---------------- Load RNA sequences from FASTA ----------------
     if not os.path.exists(cdna_fasta):
         raise FileNotFoundError(
             f"cDNA FASTA not found at {cdna_fasta}. Download from Ensembl or see README for instructions."
         )
-    
+
+    if use_all_fasta_genes:
+        print("Using all genes present in the cDNA FASTA (no HPO/omics filtering).")
+        genes_to_embed = None
+    else:
+        # ---------------- Load omics genes and map to symbols ----------------
+        df_emb = load_omics_embedding(dataset_dir)  # index: gene_id
+        df_emb = map_ensembl_to_symbol(df_emb)  # reindexed to gene_symbol
+        omics_syms = set(df_emb.index.tolist())
+        print("Omics genes (symbols):", len(omics_syms))
+
+        # ---------------- Filter HPO genes (>=20 per term) ----------------
+        hpo_syms = filter_hpo_genes(min_genes_per_term=MIN_GENES_PER_HPO, dataset_dir=dataset_dir)
+        print("HPO genes (filtered):", len(hpo_syms))
+
+        # ---------------- Intersect ----------------
+        genes_to_embed = omics_syms & hpo_syms
+        print("Genes to embed (omics ∩ HPO filtered):", len(genes_to_embed))
+
     gene2rna = gene_symbol_to_cdna_fasta(cdna_fasta, genes_to_embed)
     print("Genes with cDNA sequence:", len(gene2rna))
     if gene2rna:
