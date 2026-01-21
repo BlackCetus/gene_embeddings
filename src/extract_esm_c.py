@@ -24,10 +24,17 @@ MAX_SEQ_LEN = 1024
 MIN_GENES_PER_HPO = 20
 
 
-def gene_symbol_to_protein_fasta(fasta_path: str, gene_symbols: set[str]) -> dict[str, str]:
+def gene_symbol_to_protein_fasta(
+    fasta_path: str,
+    gene_symbols: set[str] | None = None,
+) -> dict[str, str]:
     """Load protein sequences from UniProt FASTA, keyed by gene symbol (GN=).
-    Returns the longest sequence if multiple entries exist for the same gene."""
-    gene2seq = {}
+
+    If ``gene_symbols`` is given, only those symbols are kept.
+    If ``gene_symbols`` is ``None``, all genes present in the FASTA are used.
+    Returns the longest sequence if multiple entries exist for the same gene.
+    """
+    gene2seq: dict[str, str] = {}
     gn_re = re.compile(r"\bGN=([A-Za-z0-9\-]+)\b")
 
     for record in SeqIO.parse(fasta_path, "fasta"):
@@ -37,7 +44,7 @@ def gene_symbol_to_protein_fasta(fasta_path: str, gene_symbols: set[str]) -> dic
             continue
 
         gene = m.group(1)
-        if gene not in gene_symbols:
+        if gene_symbols is not None and gene not in gene_symbols:
             continue
 
         seq = str(record.seq)
@@ -56,38 +63,49 @@ def load_model(model_name: str = MODEL_NAME, device: str = DEVICE):
     return client
 
 
-def main(dataset_dir: str = DEFAULT_DATASET_DIR, model_name: str = MODEL_NAME):
+def main(
+    dataset_dir: str = DEFAULT_DATASET_DIR,
+    model_name: str = MODEL_NAME,
+    all_fasta_genes: bool = False,
+):
     dataset_dir = os.path.abspath(dataset_dir)
     out_dir = os.path.join(dataset_dir, "esm_c_embeddings")
     uniprot_fasta = os.path.join(dataset_dir, "uniprot_human.fasta")
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # Load omics genes and map to symbols
-    df_emb = load_omics_embedding(dataset_dir)
-    df_emb = map_ensembl_to_symbol(df_emb)
-    omics_syms = set(df_emb.index.tolist())
-    print("Omics genes (symbols):", len(omics_syms))
-
-    # Filter HPO genes (>=MIN_GENES_PER_HPO per term)
-    gene2hpos = load_hpo_labels(dataset_dir)
-    hpo_counts = gene2hpos.explode().value_counts()
-    keep_terms = set(hpo_counts[hpo_counts >= MIN_GENES_PER_HPO].index.tolist())
-    hpo_syms = {g for g, terms in gene2hpos.items() if any(t in keep_terms for t in terms)}
-    print("HPO genes (filtered):", len(hpo_syms))
-
-    # Intersect
-    genes_to_embed = omics_syms & hpo_syms
-    print("Genes to embed (omics ∩ HPO filtered):", len(genes_to_embed))
-
     # Load protein sequences from FASTA
     if not os.path.exists(uniprot_fasta):
         raise FileNotFoundError(
             f"UniProt FASTA not found at {uniprot_fasta}. Download from https://www.uniprot.org/help/downloads"
         )
-    
+
+    if all_fasta_genes:
+        print("Using all genes present in the UniProt FASTA (no HPO/omics filtering).")
+        genes_to_embed = None
+    else:
+        # Load omics genes and map to symbols
+        df_emb = load_omics_embedding(dataset_dir)
+        df_emb = map_ensembl_to_symbol(df_emb)
+        omics_syms = set(df_emb.index.tolist())
+        print("Omics genes (symbols):", len(omics_syms))
+
+        # Filter HPO genes (>=MIN_GENES_PER_HPO per term)
+        gene2hpos = load_hpo_labels(dataset_dir)
+        hpo_counts = gene2hpos.explode().value_counts()
+        keep_terms = set(hpo_counts[hpo_counts >= MIN_GENES_PER_HPO].index.tolist())
+        hpo_syms = {g for g, terms in gene2hpos.items() if any(t in keep_terms for t in terms)}
+        print("HPO genes (filtered):", len(hpo_syms))
+
+        # Intersect
+        genes_to_embed = omics_syms & hpo_syms
+        print("Genes to embed (omics ∩ HPO filtered):", len(genes_to_embed))
+
     gene2seq = gene_symbol_to_protein_fasta(uniprot_fasta, genes_to_embed)
     print(f"Loaded {len(gene2seq)} protein sequences from FASTA")
+
+    if genes_to_embed is None:
+        genes_to_embed = set(gene2seq.keys())
 
     # Load model
     client = load_model(model_name=model_name, device=DEVICE)
@@ -172,7 +190,19 @@ if __name__ == "__main__":
         choices=["300m", "600m"],
         help="ESM-C model size checkpoint to use (maps to esmc_300m / esmc_600m)",
     )
+    parser.add_argument(
+        "--all-fasta-genes",
+        action="store_true",
+        help=(
+            "If set, generate embeddings for all genes present in the UniProt FASTA "
+            "(ignores HPO/omics filtering)."
+        ),
+    )
     args = parser.parse_args()
 
     model_name = f"esmc_{args.model_size}"
-    main(dataset_dir=args.dataset_dir, model_name=model_name)
+    main(
+        dataset_dir=args.dataset_dir,
+        model_name=model_name,
+        all_fasta_genes=args.all_fasta_genes,
+    )
